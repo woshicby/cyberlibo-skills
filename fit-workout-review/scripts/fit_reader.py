@@ -37,7 +37,7 @@ import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # garmin_fit_sdk 加载：优先当前 Python 环境（venv / pip install garmin-fit-sdk）。
 # 未安装时给出明确安装指引（见 SKILL.md「环境准备」与 references/fit-data-sources.md）。
@@ -274,6 +274,310 @@ def _workout_block(msgs: Dict[str, Any]) -> List[Dict[str, Any]]:
     return steps
 
 
+# ---------- 文件名 @ 标注解析与 workout_step 对齐 ----------
+# 用户课表文件名习惯: <时长><N×><工作段>@<目标>[_恢复]，例:
+#   10×800@430_3min        10 组 800m @ 配速 4:30, 恢复 3 分钟
+#   40min@127-1596×10s_110s 40 分钟主段 @ 心率 127-159, 6 组 10s 快 / 110s 恢复
+#   90min@530-540          90 分钟 @ 配速 5:30-5:40
+#   1×10min@E              1 组 10 分钟 @ E 区间
+#   25k@2.0-2.5            25k @ 每 10km 2:00-2:30（小数 = 小时目标）
+#   1×1h@法特莱克           文字标注
+# 数字判别核心规则（用户确认）: 1 分多/km 配速不现实, 所以 100-199 必为心率;
+# 400-599 等高位按紧凑配速 mss 解析（436 -> 4:36 -> 276 s/km）。
+
+def _classify_numeric(n: int) -> Dict[str, Any]:
+    """把一个 @ 后整数分类: pace（紧凑 mss 配速）/ heart_rate / unknown。"""
+    m, ss = divmod(int(n), 100)
+    pace_valid = ss < 60 and m >= 1
+    out: Dict[str, Any] = {"n": n}
+    if 100 <= n <= 199:
+        out.update(kind="heart_rate", confidence="high")
+    elif n >= 200 and pace_valid:
+        out.update(kind="pace", s_per_km=m * 60 + ss,
+                   confidence="medium" if n < 300 else "high")
+    elif 60 <= n < 100:
+        out.update(kind="heart_rate", confidence="low")
+    else:
+        out.update(kind="unknown", confidence="none")
+    return out
+
+
+def _split_glued(x: int) -> Tuple[Optional[int], Optional[int]]:
+    """4 位数字拆分: 前 3 位为值, 末位为粘连的重复次数/距离/分钟尾。
+
+    例: 1596 -> (159, 6); 5022 -> (502, 2); 520 -> (520, None)
+    """
+    if 1000 <= x <= 9999:
+        s = str(x)
+        return int(s[:3]), int(s[3])
+    return x, None
+
+
+def _parse_target_token(raw: str) -> Dict[str, Any]:
+    """解析单个 @ 后的目标 token（不含 @）。"""
+    raw = raw.strip()
+    # 文字/字母标注（E/M/R/easyM/法特莱克/轻松跑...）
+    if not raw or not re.match(r"^[0-9]", raw):
+        if re.match(r"^[A-Za-z]", raw):
+            return {"kind": "zone", "label": re.split(r"[-_×(]", raw)[0]}
+        return {"kind": "text", "value": re.split(r"[_×(]", raw)[0][:8]}
+    # 小数: 心率分区（25k@2.0-2.5 = 心率区 2.0-2.5；bpm↔分区映射随
+    # 静息/最大心率变化，不硬换算，只与设备段实测心率区间并列陈述）
+    dm = re.match(r"^(\d+(?:\.\d+))[-](\d+(?:\.\d+))", raw)
+    if dm and "." in raw:
+        return {"kind": "hr_zone", "value": [
+            float(dm.group(1)), float(dm.group(2))], "consumed": dm.end()}
+    sm = re.match(r"^(\d+)(?:\.(\d+))?", raw)
+    a = int(sm.group(1))
+    a_dec = sm.group(2) is not None
+    rest = raw[sm.end():]
+    # 区间: 上界 1-4 位数字（4 位 = 3 位值 + 1 位粘连尾）
+    if rest.startswith("-"):
+        dm2 = re.match(r"^-(\d{1,4})(?!\d)", rest)
+        if dm2:
+            dseq = dm2.group(1)
+            b_extra = None
+            if len(dseq) <= 3:
+                b = int(dseq)
+            else:  # 4 位: 前 3 位是值, 末位粘连
+                b, b_extra = _split_glued(int(dseq))
+            a_cls, b_cls = _classify_numeric(a), _classify_numeric(b)
+            if a_cls["kind"] != b_cls["kind"]:
+                # 两端分类不一致（截断/粘连所致），取低置信并标注
+                for c in (a_cls, b_cls):
+                    c["confidence"] = "low"
+            return {"kind": "range", "lo": a, "hi": b,
+                    "lo_cls": a_cls, "hi_cls": b_cls,
+                    "hi_extra": b_extra, "consumed": sm.end() + dm2.end()}
+    # 单值（4 位 = 3 位值 + 1 位粘连尾；5+ 位 = 截断残留，不裁决）
+    a_extra = None
+    digits_len = len(sm.group(1))
+    if digits_len >= 5:
+        return {"kind": "unknown", "lo": None, "consumed": digits_len}
+    if digits_len == 4:
+        a, a_extra = _split_glued(a)
+    return {"kind": "single", "lo": a, "lo_cls": _classify_numeric(a),
+            "a_extra": a_extra, "consumed": digits_len}
+
+
+_TIME_UNIT = re.compile(r"(\d+(?:\.\d+)?)\s*(s|sec|mins|min|mim)\b")
+_DIST_UNIT = re.compile(r"(\d+(?:\.\d+)?)\s*(m|k)\b")
+
+
+def _extract_work(pre: str) -> Optional[Dict[str, Any]]:
+    """从 @ 前缀提取工作段: 取最后一个 × 之后的部分（无 × 取尾段）。"""
+    pre = pre[-16:]
+    if "×" in pre:
+        work_part = pre.split("×")[-1]
+    else:
+        # 去掉 @ 前的块时长/距离（含单位字母, 如 5min/10k/40min）
+        work_part = re.sub(r"^[\d.]+[a-z]*[\s]*", "", pre) or pre
+    tm = _TIME_UNIT.search(work_part)
+    if tm:
+        v = float(tm.group(1))
+        unit = tm.group(2)
+        secs = v * 60 if unit in ("mins", "min", "mim") else v
+        if secs > 28800:  # >8h 必为文件名粘连误判, 丢弃
+            return None
+        return {"kind": "time", "value_s": int(round(secs))}
+    dmm = _DIST_UNIT.search(work_part)
+    if dmm:
+        v = float(dmm.group(1))
+        meters = v * 1000 if dmm.group(2) == "k" else v
+        if meters > 160000:  # >160km 必为粘连误判, 丢弃
+            return None
+        return {"kind": "distance", "value_m": int(round(meters))}
+    bm = re.match(r"^(\d{2,4})$", work_part.strip("() "))
+    if bm:
+        return {"kind": "distance", "value_m": int(bm.group(1))}
+    return None
+
+
+def _extract_name_annotations(name: str) -> List[Dict[str, Any]]:
+    """提取文件名中所有 @ 标注（去掉 .fit 后缀与结尾活动 ID）。"""
+    base = name[:-4] if name.lower().endswith(".fit") else name
+    base = re.sub(r"-\d{7,10}$", "", base)
+    out = []
+    for m in re.finditer(r"@", base):
+        pre = base[max(0, m.start() - 16):m.start()]
+        post = base[m.end():m.end() + 18]
+        tkm = re.match(r"^([^@]{1,14})", post)
+        token = tkm.group(1) if tkm else ""
+        target = _parse_target_token(token)
+        ann: Dict[str, Any] = {"target": target,
+                               "work": _extract_work(pre),
+                               "reps": None, "recovery": None}
+        # 组数: N× 且 × 前数字串 ≤3 位（4 位是粘连目标值如 @127-1596×）
+        rm = re.search(r"(?<!\d)(\d{1,3})\s*[×x]", pre)
+        if rm:
+            ann["reps"] = int(rm.group(1))
+        # 目标消耗长度（数值 token 精确到数字串末尾; 字母/文字取整段）
+        consumed = target.get("consumed", len(token))
+        # 恢复段: 目标后 _Ns / _Nmin（如 20s@436-425_60s 的 60s 恢复）
+        after = post[consumed:]
+        rcm = re.match(r"^[_\-](\d{1,3})\s*(s|sec|mins|min|mim)?\)?", after)
+        if rcm:
+            v = float(rcm.group(1))
+            unit = rcm.group(2)
+            ann["recovery"] = int(round(v * 60 if unit in ("mins", "min", "mim") else v))
+        # 4 位 hi 末位 + 后续 × => 重复次数（如 @127-1596×10s）
+        if target.get("kind") == "range" and target.get("hi_extra") is not None:
+            if re.match(r"^\d+\s*×", after) or re.match(r"^×", after):
+                ann["reps"] = ann["reps"] or target["hi_extra"]
+                target["hi_extra"] = None
+        # ×N 后的 工作_恢复 时长对（如 6×10s_110s => 10s 快段 / 110s 恢复）
+        wrm = re.match(r"^[×x]?\s*(\d+)\s*(s|sec|min|mim)?\s*[_\-]\s*(\d+)\s*(s|sec|min|mim)?", after)
+        if wrm and ann["work"] is None:
+            wv = float(wrm.group(1))
+            wu = wrm.group(2)
+            ann["work"] = {"kind": "time",
+                           "value_s": int(round(wv * 60 if wu in ("min", "mim") else wv))}
+            rv = float(wrm.group(3))
+            ru = wrm.group(4)
+            ann["recovery"] = ann["recovery"] or int(
+                round(rv * 60 if ru in ("min", "mim") else rv))
+        out.append(ann)
+    return out
+
+
+def _fmt_time_s(secs: Optional[float]) -> Optional[str]:
+    if secs is None:
+        return None
+    if secs >= 60 and int(secs) % 60 == 0:
+        return f"{secs // 60}min"
+    return f"{secs:g}s"
+
+
+def _target_display(t: Dict[str, Any]) -> Optional[str]:
+    k = t.get("kind")
+    if k == "range":
+        lo_c, hi_c = t.get("lo_cls"), t.get("hi_cls")
+        if lo_c.get("kind") == "pace":
+            lo_s, hi_s = lo_c["s_per_km"], hi_c["s_per_km"]
+            return _pace_display([hi_s, lo_s])  # 快端在前
+        if lo_c.get("kind") == "heart_rate":
+            return f"{t['lo']}-{t['hi']}bpm"
+    if k == "single":
+        c = t.get("lo_cls")
+        if c.get("kind") == "pace":
+            return _pace_display([c["s_per_km"]])
+        if c.get("kind") == "heart_rate":
+            return f"{t['lo']}bpm"
+    if k == "zone":
+        return t.get("label")
+    if k == "text":
+        return t.get("value")
+    if k == "hr_zone":
+        return f"心率区{t['value'][0]}-{t['value'][1]}"
+    return None
+
+
+def _name_alignment(name: str, steps: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """文件名 @ 标注 vs FIT workout_step 对齐。
+
+    规则（与 skill 哲学一致）: FIT workout_step 是第一证据; 文件名标注是
+    用户简写。两者核对后分别陈述, 矛盾时不自动裁决。
+    """
+    anns = _extract_name_annotations(name)
+    if not anns:
+        return {"annotations": [],
+                "note": "文件名无 @ 标注；训练结构以 workout_steps 为准。"}
+    steps_present = bool(steps)
+    used: set = set()
+    results = []
+    for ann in anns:
+        t = ann["target"]
+        r: Dict[str, Any] = {
+            "target": t,
+            "target_display": _target_display(t),
+            "work": ann["work"],
+            "reps": ann["reps"],
+            "recovery_s": ann["recovery"],
+            "matched_step": None, "step_target": None,
+            "aligned": None, "notes": [],
+        }
+        if t.get("kind") in ("pace", "range", "single") and steps_present:
+            want = []
+            if t.get("kind") == "range":
+                if t["lo_cls"]["kind"] == "pace" and t["hi_cls"]["kind"] == "pace":
+                    want = ("pace", [t["lo_cls"]["s_per_km"], t["hi_cls"]["s_per_km"]])
+                elif t["lo_cls"]["kind"] == "heart_rate":
+                    want = ("hr", [t["lo"], t["hi"]])
+            elif t.get("kind") == "single":
+                c = t["lo_cls"]
+                if c["kind"] == "pace":
+                    want = ("pace", [c["s_per_km"], c["s_per_km"]])
+                elif c["kind"] == "heart_rate":
+                    want = ("hr", [t["lo"], t["lo"]])
+            if want:
+                kind, vals = want
+                best, best_err = None, None
+                for s in steps:
+                    if s["index"] in used:
+                        continue
+                    if kind == "pace" and s.get("target_pace_s_per_km"):
+                        sl, sh = s["target_pace_s_per_km"]
+                        err = min(min(abs(a - sl), abs(a - sh)) for a in vals)
+                    elif kind == "hr" and s.get("target_heart_rate"):
+                        sl, sh = s["target_heart_rate"]
+                        if len(vals) == 1:
+                            err = 0.0 if sl <= vals[0] <= sh else min(
+                                abs(vals[0] - sl), abs(vals[0] - sh))
+                        else:
+                            if max(vals[0], sl) <= min(vals[1], sh):
+                                err = 0.0  # 区间重叠
+                            else:
+                                err = min(abs(a - b) for a in vals for b in (sl, sh))
+                    else:
+                        continue
+                    if best_err is None or err < best_err:
+                        best, best_err = s, err
+                if best is not None and best_err is not None:
+                    tol = 10.0  # s/km 或 bpm
+                    r["matched_step"] = best["index"]
+                    used.add(best["index"])
+                    r["step_target"] = best.get("target_pace_display") \
+                        or (f"{best['target_heart_rate'][0]}-{best['target_heart_rate'][1]}bpm"
+                            if best.get("target_heart_rate") else best.get("target_type"))
+                    r["step_duration_s"] = best.get("duration_time_s")
+                    r["aligned"] = bool(best_err <= tol)
+                    if not r["aligned"]:
+                        r["notes"].append(
+                            f"文件名目标与设备记录接近（差 {best_err:g}）但不完全一致；以 workout_step 为准，可核对课表")
+                    if (r["aligned"] and ann["work"] and ann["work"]["kind"] == "time"
+                            and best.get("duration_time_s")):
+                        if abs(ann["work"]["value_s"] - best["duration_time_s"]) > 2:
+                            r["notes"].append(
+                                f"文件名标工作段 {_fmt_time_s(ann['work']['value_s'])}，"
+                                f"设备记录 {best['duration_time_s']:g}s；以设备记录为准")
+        else:
+            # 区间字母/心率分区/文字标注: 无法数值对齐, 给设备实际目标供参考
+            if steps_present:
+                hr_steps = [s for s in steps if s.get("target_heart_rate")]
+                if t.get("kind") == "hr_zone":
+                    ref = (hr_steps or [None])[0]
+                else:
+                    ref = (hr_steps or steps)[0] \
+                        if (hr_steps or steps) else None
+                if ref is not None:
+                    r["step_target"] = (f"{ref['target_heart_rate'][0]:g}-{ref['target_heart_rate'][1]:g}bpm"
+                                        if ref.get("target_heart_rate")
+                                        else ref.get("target_pace_display"))
+            if t.get("kind") == "hr_zone":
+                r["notes"].append(
+                    "心率分区标注；分区↔bpm 映射随静息/最大心率变化，"
+                    "FIT 未存分区边界，无法从文件核对，按设备段实测心率区间陈述")
+            else:
+                r["notes"].append("非数值标注（区间标签/文字），不与 workout_step 数值对齐")
+        results.append(r)
+    note = ("FIT workout_step 为第一证据；文件名标注为课表简写。"
+            "aligned=false 或缺 matched_step 时分别陈述，不自动裁决。"
+            if steps_present else
+            "FIT 中无 workout_step 记录，仅报告文件名标注的解析结果。")
+    return {"annotations": results, "note": note}
+
+
+
 def _record_rows(msgs: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows = []
     for r in msgs.get("record_mesgs", []):
@@ -325,11 +629,13 @@ def _build_summary(name: str, path: str) -> Dict[str, Any]:
         q = max(1, len(valid_hr) // 4)
         drift = _round(_mean(valid_hr[-q:]) - _mean(valid_hr[:q]), 1)
 
+    steps = _workout_block(msgs)
     out: Dict[str, Any] = {
         "source": "local FIT",
         "file": name,
         "session": session,
-        "workout_steps": _workout_block(msgs),
+        "workout_steps": steps,
+        "name_alignment": _name_alignment(name, steps),
         "quality": {
             "records": len(records),
             "heart_rate": _coverage(records, "hr"),
