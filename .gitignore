@@ -1,2 +1,7 @@
 .DS_Store
 **/.DS_Store
+
+# Python venvs (per-machine, not distributable)
+.venv-windows/
+.venv-macos/
+.venv-linux/

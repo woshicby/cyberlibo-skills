@@ -2,9 +2,9 @@
 
 面向跑者的公开 Skills：用证据还原训练，用边界约束结论，再给一个低风险、可验证的下一步。
 
-当前版本：`v1.2.0`
+当前版本：`v1.3.0`
 
-发布日期：`2026-08-16`
+发布日期：`2026-10-09`
 
 ## 已发布 Skills
 
@@ -36,6 +36,20 @@
 
 这是独立社区项目，不代表 COROS，也不暗示 COROS 或任何 AI 客户端为分析结论背书。
 
+### FIT 训练复盘｜赛博黑影儿
+
+`fit-workout-review/` 读取本地 FIT 活动文件（如 Garmin/keep 同步目录），复盘方法与 COROS 版一致，但完全不依赖 COROS 云端：没有账号、没有 OAuth、不上传任何文件。FIT 目录路径按 `--dir` 参数 > 环境变量 `FIT_WORKOUT_REVIEW_FIT_DIR` > 默认 `~/FIT` 解析，可自由设置，不绑定任何具体机器。
+
+数据层为 `scripts/fit_reader.py`（`list` / `summary` / `laps` / `window` 四级读取梯度），只输出复盘所需字段，坐标与位置字段不进入输出。间歇结构优先以 FIT `workout_step` 为第一证据。环境温湿度优先使用 FIT 温度字段，缺失或不可信且用户明确授权时，可沿用 OpenWeatherMap One Call API 4.0 补全路径（同样需要单次位置授权）。
+
+示例：
+
+```text
+使用 $fit-workout-review 复盘我本地 FIT 文件夹里最近一次间歇跑；先说明还缺什么信息，不要直接给训练剂量。
+```
+
+这是独立社区项目，不代表 Garmin 或 COROS，也不暗示任何 AI 客户端为分析结论背书。
+
 ## 安装
 
 克隆仓库：
@@ -50,6 +64,7 @@ mkdir -p "$HOME/.agents/skills"
 ```bash
 ln -s "$(pwd)/public-skills/shadowrunner" "$HOME/.agents/skills/shadowrunner"
 ln -s "$(pwd)/public-skills/coros-workout-review" "$HOME/.agents/skills/coros-workout-review"
+ln -s "$(pwd)/public-skills/fit-workout-review" "$HOME/.agents/skills/fit-workout-review"
 ```
 
 如果目标位置已经存在，请先自行备份；不要让软链接覆盖尚未保存的私有版本。Codex/Agents 宿主需要支持以 `SKILL.md` 为入口的本地 Skill。
