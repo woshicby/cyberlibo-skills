@@ -75,6 +75,7 @@ YYYYMMDD-HHMMSS-运动类型[-描述]-活动ID.fit
 - `intensity`: `active` / `rest`；`rest` 段即组间恢复段；
 - `target_type`: `speed` / `heart_rate` / `open` / 其他；
 - `target_pace_s_per_km`（速度段）：`[最快端, 最慢端]`，秒/公里；
+- `target_pace_display`（速度段）：同值的人类可读形式 `m:ss[-m:ss]`（快端在前），与文件名 `20s@436-425` 这类 `m:ss` 配速命名习惯可直接对照；
 - `target_heart_rate`（心率段）：`[下限, 上限]`；
 - `duration_time_s`：该段目标时长；
 - `repeat_steps`：重复次数；

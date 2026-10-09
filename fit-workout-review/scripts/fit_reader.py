@@ -94,6 +94,22 @@ def _s2pace_ms(mps: Optional[float]) -> Optional[float]:
     return 1000.0 / mps
 
 
+def _pace_display(s_per_km_vals: List[Optional[float]]) -> Optional[str]:
+    """s/km 值列表 -> 'm:ss' 记法，区间 -> 'm:ss-m:ss'（快端在前）。
+
+    例: [265, 276] -> '4:25-4:36'，与常见文件名命名习惯一致。
+    """
+    def one(v: Optional[float]) -> Optional[str]:
+        if v is None or v <= 0:
+            return None
+        m, s = divmod(int(round(v)), 60)
+        return f"{m}:{s:02d}"
+
+    parts = [one(v) for v in s_per_km_vals]
+    parts = [p for p in parts if p]
+    return "-".join(parts) if parts else None
+
+
 def _mean(vals: List[float]) -> Optional[float]:
     vals = [v for v in vals if v is not None]
     return sum(vals) / len(vals) if vals else None
@@ -248,8 +264,10 @@ def _workout_block(msgs: Dict[str, Any]) -> List[Dict[str, Any]]:
         }
         if tgt == "speed" and (speed_lo or speed_hi):
             step["target_speed_mps"] = [speed_lo, speed_hi]
-            step["target_pace_s_per_km"] = [
+            pace_vals = [
                 _round(_s2pace_ms(speed_hi), 1), _round(_s2pace_ms(speed_lo), 1)]
+            step["target_pace_s_per_km"] = pace_vals
+            step["target_pace_display"] = _pace_display(pace_vals)
         if tgt == "heart_rate" and (hr_lo or hr_hi):
             step["target_heart_rate"] = [hr_lo, hr_hi]
         steps.append(step)
