@@ -83,6 +83,20 @@ YYYYMMDD-HHMMSS-运动类型[-描述]-活动ID.fit
 
 间歇结构判断顺序：先看 `workout_steps`（第一证据），再用 `laps` 实际值对照。两者矛盾时分别陈述，不自动裁决。
 
+`name_alignment`（文件名 `@` 课表标注 vs `workout_steps` 对齐，`summary` 输出）：
+文件名常用 `@` 写课表目标（如 `35min3×(20s@436-425_60s)`、`40min@127-159 6×10s_110s`、`10×800@430_3min`、`1×10min@E`、`25k@2.0-2.5`）。本块把文件名标注解析后与设备 `workout_step` 逐段核对，**`workout_step` 是第一证据、文件名是用户简写，两者核对后分别陈述、矛盾时不自动裁决**：
+
+- `annotations`：每个 `@` 一段，含
+  - `target`：原始标注，`kind` ∈ `range`/`single`（数值）/`zone`（E/M/R 字母）/`hr_zone`（心率分区，如 `2.0-2.5`）/`text`（文字如"法特莱克"）/`unknown`；
+  - `target_display`：人类可读（配速 `m:ss`、心率 `N-Nbpm`、区间字母、心率分区如 `心率区2.0-2.5`）；
+  - `work`：该段工作段（`time` 秒 / `distance` 米），`reps`：组数，`recovery_s`：恢复时长；
+  - `matched_step`：对齐到的 `workout_step` 下标（无则为 `null`）；`step_target`：该设备段的目标（第一证据）；
+  - `aligned`：`true`（数值一致）/`false`（接近但不完全一致，附 `notes`）/`null`（非数值标注或无 `workout_step` 可对齐）；
+  - `notes`：矛盾提示（如“文件名标 20s，设备记录 30s；以设备记录为准”）。
+- `note`：本块的对齐口径说明。
+
+数值判别规则（用户课表习惯）：`@` 后三位数按数值范围自动判别——`100-199` 判为心率（bpm，人基本不可能跑到 1 分多/公里），`200-299` 判为配速 `m:ss`（276=4:36）低置信、`300-999` 判为配速高置信；**带小数的 `2.0-2.5` 判为心率分区**（不是配速也不是时间目标），分区↔bpm 的映射随静息/最大心率变化，FIT 未存分区边界，因此不与 bpm 数值对齐、只与设备段实测心率区间并列陈述；字母 `E/M/R` 判为区间标签；中文判为文字标注。`@` 前 `×` 后是工作段（`20s`/`800`/`10min`），目标后 `_60s`/`_3min` 是恢复段。该判别只用于**对齐陈述**，不覆盖设备 `workout_step` 的原始记录。
+
 `quality`（数据完整性，必须如实反映到置信度）：
 
 - `heart_rate` / `cadence` / `power` / `speed` / `altitude`：`ok`（覆盖率 ≥ 95%）/ `partial` / `missing` + `coverage` 数值；
