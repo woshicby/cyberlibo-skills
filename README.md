@@ -1,6 +1,8 @@
-# 赛博黑影儿 · Public Skills
+# 赛博黑影儿 · cyberlibo-skills
 
 面向跑者的公开 Skills：用证据还原训练，用边界约束结论，再给一个低风险、可验证的下一步。
+
+本仓库基于 [leeeboo/public-skills](https://github.com/leeeboo/public-skills)（CC BY-NC-SA 4.0）fork，在其上新增本地 FIT 数据源的 `fit-workout-review`，方法框架与原 skill 一致；`coros-workout-review` 与 `shadowrunner` 原样保留。
 
 当前版本：`v1.3.0`
 
@@ -55,16 +57,16 @@
 克隆仓库：
 
 ```bash
-git clone https://github.com/leeeboo/public-skills.git
+git clone https://github.com/woshicby/cyberlibo-skills.git
 mkdir -p "$HOME/.agents/skills"
 ```
 
 按需链接一个或两个 Skill：
 
 ```bash
-ln -s "$(pwd)/public-skills/shadowrunner" "$HOME/.agents/skills/shadowrunner"
-ln -s "$(pwd)/public-skills/coros-workout-review" "$HOME/.agents/skills/coros-workout-review"
-ln -s "$(pwd)/public-skills/fit-workout-review" "$HOME/.agents/skills/fit-workout-review"
+ln -s "$(pwd)/cyberlibo-skills/shadowrunner" "$HOME/.agents/skills/shadowrunner"
+ln -s "$(pwd)/cyberlibo-skills/coros-workout-review" "$HOME/.agents/skills/coros-workout-review"
+ln -s "$(pwd)/cyberlibo-skills/fit-workout-review" "$HOME/.agents/skills/fit-workout-review"
 ```
 
 如果目标位置已经存在，请先自行备份；不要让软链接覆盖尚未保存的私有版本。Codex/Agents 宿主需要支持以 `SKILL.md` 为入口的本地 Skill。
@@ -76,7 +78,7 @@ ln -s "$(pwd)/public-skills/fit-workout-review" "$HOME/.agents/skills/fit-workou
 ## 目录
 
 ```text
-public-skills/
+cyberlibo-skills/
 ├── .gitattributes
 ├── README.md
 ├── CHANGELOG.md
